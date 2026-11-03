@@ -47,6 +47,8 @@ def test_fetch_daily_normalises_chinese_columns(
     assert list(frame.columns) == ["date", "open", "high", "low", "close", "volume", "amount"]
     assert frame["date"].is_monotonic_increasing
     assert frame["open"].dtype.kind == "f"
+    # 成交量 comes in lots (手); canonical volume is shares, so x100 after sorting.
+    assert frame["volume"].tolist() == [10_000_000.0, 12_000_000.0]
     assert captured["symbol"] == "600519"
     assert captured["start_date"] == "20240102"
     assert captured["end_date"] == "20240105"

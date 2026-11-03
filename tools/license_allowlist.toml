@@ -29,6 +29,9 @@ python-dateutil = "BSD-3-Clause"   # Dual-licensed Apache-2.0 / BSD-3-Clause; re
 akshare = "MIT"                    # VERIFIED: akshare is MIT
 # license unverified: confirm before shipping
 baostock = "Apache-2.0"            # UNVERIFIED — no clear SPDX declaration upstream
+# Re-checked 2026-11-03 on the 0.9.4 wheel: METADATA says only
+# "License: BSD License" (+ the matching classifier) and the wheel ships no
+# LICENSE file, so BSD-2 vs BSD-3 cannot be decided -> stays UNVERIFIED.
 # (baostock ships a vendored/echoing client; re-check the LICENSE file in the
 #  distributed wheel before any production or redistribution use.)
 
