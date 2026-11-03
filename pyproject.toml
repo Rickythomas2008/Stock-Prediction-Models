@@ -38,6 +38,12 @@ models = [
 tune = [
     "optuna>=4.0",
 ]
+# Reinforcement-learning environment. Optional: gymnasium + SB3 are only needed
+# to run policy training, never for the decision pipeline.
+rl = [
+    "gymnasium>=1.0",
+    "stable-baselines3>=2.3",
+]
 
 [tool.setuptools]
 package-dir = { "" = "src" }

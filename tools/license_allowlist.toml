@@ -42,3 +42,7 @@ neuralforecast = "Apache-2.0"      # VERIFIED: Nixtla neuralforecast is Apache-2
 
 # --- optional [tune] extra --------------------------------------------------
 optuna = "MIT"                     # VERIFIED: optuna is MIT
+
+# --- optional [rl] extra ----------------------------------------------------
+gymnasium = "MIT"                  # VERIFIED: Farama gymnasium is MIT
+stable-baselines3 = "MIT"          # VERIFIED: SB3 is MIT

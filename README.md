@@ -13,6 +13,35 @@
 
 **Stock-Prediction-Models**, Gathers machine learning and deep learning models for Stock forecasting, included trading bots and simulations.
 
+## Engineering package (stockpred)
+
+The notebooks in this repository are kept as reference material. The working
+A-share decision system lives in `src/stockpred` and is documented separately:
+
+| Topic | Document |
+|---|---|
+| Migration report: what was ported, what was not, and why | [docs/MIGRATION-REPORT.md](docs/MIGRATION-REPORT.md) |
+| Evaluation protocol (leak-free splits, cost-aware metrics) | [docs/EVAL-PROTOCOL.md](docs/EVAL-PROTOCOL.md) |
+| Decision chain (alpha -> portfolio -> execution -> risk gate) | [docs/DECISION-PIPELINE.md](docs/DECISION-PIPELINE.md) |
+| Paper trading, reconciliation, audit chain | [docs/PAPER-RUN.md](docs/PAPER-RUN.md) |
+| Decision API contract | [docs/SERVING.md](docs/SERVING.md) |
+| Purged CV and triple-barrier labeling | [docs/PURGED-CV.md](docs/PURGED-CV.md) |
+| Broker inquiry template (written answers only) | [docs/BROKER-INQUIRY.md](docs/BROKER-INQUIRY.md) |
+| Known debt and open items | [docs/TECH-DEBT.md](docs/TECH-DEBT.md) |
+
+Quick start:
+
+```bash
+python -m venv .venv && .venv/Scripts/python -m pip install -e ".[dev]"
+.venv/Scripts/python -m pytest -q
+.venv/Scripts/python tools/demo_decide.py     # one decision package
+.venv/Scripts/python tools/demo_paper_loop.py 12
+```
+
+No component in this repository places a live order. Automatic order submission
+requires a signed broker confirmation of the program-trading filing
+(CSRC 2024 No.8, art.8) and is not implemented.
+
 ## Table of contents
   * [Models](#models)
   * [Agents](#agents)
