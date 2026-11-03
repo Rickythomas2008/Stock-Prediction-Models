@@ -58,7 +58,7 @@
 
 ```bash
 python -m venv .venv && .venv/Scripts/python -m pip install -e ".[dev]"
-.venv/Scripts/python -m pytest -q                     # 404 passed
+.venv/Scripts/python -m pytest -q                     # 415 passed
 .venv/Scripts/python -m ruff check src tests tools     # All checks passed
 .venv/Scripts/python tools/check_licenses.py           # RESULT: PASS
 .venv/Scripts/python tools/demo_decide.py              # 一个决策包
