@@ -35,3 +35,10 @@ baostock = "Apache-2.0"            # UNVERIFIED — no clear SPDX declaration up
 # --- optional [dev] extra ---------------------------------------------------
 pytest = "MIT"
 ruff = "MIT"
+
+# --- optional [models] extra ------------------------------------------------
+torch = "BSD-3-Clause"             # VERIFIED: PyTorch is BSD-3-Clause
+neuralforecast = "Apache-2.0"      # VERIFIED: Nixtla neuralforecast is Apache-2.0
+
+# --- optional [tune] extra --------------------------------------------------
+optuna = "MIT"                     # VERIFIED: optuna is MIT

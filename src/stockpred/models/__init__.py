@@ -11,12 +11,15 @@ from stockpred.models.baselines import (
     default_baselines,
     evaluate_forecasters,
 )
+from stockpred.models.neural import SUPPORTED_MODELS, NeuralForecastAdapter
 
 __all__ = [
     "DriftForecaster",
     "Forecaster",
     "MovingAverageForecaster",
     "NaiveForecaster",
+    "NeuralForecastAdapter",
+    "SUPPORTED_MODELS",
     "SeasonalNaiveForecaster",
     "default_baselines",
     "evaluate_forecasters",

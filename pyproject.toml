@@ -29,6 +29,15 @@ dev = [
     "pytest>=8",
     "ruff>=0.6",
 ]
+# Deep-learning stack and hyper-parameter search. Optional so the core package,
+# its tests and CI stay installable without a multi-hundred-MB torch wheel.
+models = [
+    "torch>=2.4",
+    "neuralforecast>=3.3",
+]
+tune = [
+    "optuna>=4.0",
+]
 
 [tool.setuptools]
 package-dir = { "" = "src" }
