@@ -20,7 +20,10 @@ A-share decision system lives in `src/stockpred` and is documented separately:
 
 | Topic | Document |
 |---|---|
+| **Start here: goal, non-goals, verified commands** | [BRIEF.md](BRIEF.md) |
+| **Handoff: what to read first, code map, gates, traps** | [docs/HANDOFF.md](docs/HANDOFF.md) |
 | Migration report: what was ported, what was not, and why | [docs/MIGRATION-REPORT.md](docs/MIGRATION-REPORT.md) |
+| Agent migration: 8 ported, 4 re-pointed, 11 kept as reference | [docs/AGENT-MIGRATION.md](docs/AGENT-MIGRATION.md) |
 | Evaluation protocol (leak-free splits, cost-aware metrics) | [docs/EVAL-PROTOCOL.md](docs/EVAL-PROTOCOL.md) |
 | Decision chain (alpha -> portfolio -> execution -> risk gate) | [docs/DECISION-PIPELINE.md](docs/DECISION-PIPELINE.md) |
 | Paper trading, reconciliation, audit chain | [docs/PAPER-RUN.md](docs/PAPER-RUN.md) |
@@ -28,6 +31,8 @@ A-share decision system lives in `src/stockpred` and is documented separately:
 | Purged CV and triple-barrier labeling | [docs/PURGED-CV.md](docs/PURGED-CV.md) |
 | Broker inquiry template (written answers only) | [docs/BROKER-INQUIRY.md](docs/BROKER-INQUIRY.md) |
 | Known debt and open items | [docs/TECH-DEBT.md](docs/TECH-DEBT.md) |
+| Retro (S6) | [docs/RETRO-S6.md](docs/RETRO-S6.md) |
+| Spikes: TimesFM / qlib, with the actual numbers | [docs/SPIKE-TSFM.md](docs/SPIKE-TSFM.md), [docs/SPIKE-QLIB.md](docs/SPIKE-QLIB.md) |
 
 Quick start:
 
@@ -36,6 +41,9 @@ python -m venv .venv && .venv/Scripts/python -m pip install -e ".[dev]"
 .venv/Scripts/python -m pytest -q
 .venv/Scripts/python tools/demo_decide.py     # one decision package
 .venv/Scripts/python tools/demo_paper_loop.py 12
+.venv/Scripts/python -m pip install -e ".[data]"  # real market-data providers
+.venv/Scripts/python tools/live_smoke.py      # live fetch + provider cross-check
+.venv/Scripts/python tools/live_universe_run.py --days 90   # 20-symbol live run
 ```
 
 No component in this repository places a live order. Automatic order submission
