@@ -54,6 +54,9 @@ class AshareTradingEnv(gym.Env):
         cost_model: CostModel | None = None,
         symbol: str = "600519",
         block_limits: bool = True,
+        observation_mode: str = "compact",
+        action_mode: str = "lots",
+        window_size: int = 30,
     ) -> None:
         super().__init__()
         required = {"date", "open", "high", "low", "close"}
@@ -64,6 +67,14 @@ class AshareTradingEnv(gym.Env):
             raise ValueError("need at least 3 bars")
         if max_lots < 1:
             raise ValueError("max_lots must be >= 1")
+        if observation_mode not in {"compact", "price_diffs"}:
+            raise ValueError(
+                f"observation_mode must be 'compact' or 'price_diffs', got {observation_mode!r}"
+            )
+        if action_mode not in {"lots", "unit"}:
+            raise ValueError(f"action_mode must be 'lots' or 'unit', got {action_mode!r}")
+        if observation_mode == "price_diffs" and window_size < 2:
+            raise ValueError("window_size must be >= 2 for price_diffs observations")
 
         self.bars = bars.reset_index(drop=True)
         self.initial_cash = float(initial_cash)
@@ -71,19 +82,33 @@ class AshareTradingEnv(gym.Env):
         self.cost_model = cost_model or CostModel()
         self.symbol = symbol
         self.block_limits = block_limits
+        self.observation_mode = observation_mode
+        self.action_mode = action_mode
+        self.window_size = int(window_size)
 
         self._n = len(self.bars)
-        self._n_actions = 2 * self.max_lots + 1
+        # 'unit' reproduces the legacy notebooks' three-way action (buy one unit /
+        # hold / sell one unit), so an original agent can be attached without
+        # rewriting its output layer.
+        self._n_actions = 3 if action_mode == "unit" else 2 * self.max_lots + 1
 
         self.action_space = spaces.Discrete(self._n_actions)
         # Finite bounds keep gymnasium's checker quiet and catch a scaled-input
         # mistake early (an observation outside these ranges means a bug, not a market).
-        self.observation_space = spaces.Box(
-            low=np.array([0.0, 0.0, 0.0, 0.0], dtype=np.float32),
-            high=np.array([1e4, 1.0, 1e4, 1.0], dtype=np.float32),
-            shape=(4,),
-            dtype=np.float32,
-        )
+        if observation_mode == "price_diffs":
+            self.observation_space = spaces.Box(
+                low=np.array([-1e4] * (self.window_size - 1), dtype=np.float32),
+                high=np.array([1e4] * (self.window_size - 1), dtype=np.float32),
+                shape=(self.window_size - 1,),
+                dtype=np.float32,
+            )
+        else:
+            self.observation_space = spaces.Box(
+                low=np.array([0.0, 0.0, 0.0, 0.0], dtype=np.float32),
+                high=np.array([1e4, 1.0, 1e4, 1.0], dtype=np.float32),
+                shape=(4,),
+                dtype=np.float32,
+            )
 
         self._reset_state()
 
@@ -130,6 +155,9 @@ class AshareTradingEnv(gym.Env):
         self._base_close = float(self.bars.iloc[0]["close"])
 
     def _decode(self, action: int) -> tuple[str, int]:
+        if self.action_mode == "unit":
+            # 0 = buy one lot, 1 = hold, 2 = sell one lot
+            return {0: ("buy", 1), 1: ("hold", 0), 2: ("sell", 1)}[action]
         if action < self.max_lots:
             return "buy", action + 1
         if action == self.max_lots:
@@ -179,6 +207,17 @@ class AshareTradingEnv(gym.Env):
 
     def _observation(self) -> np.ndarray:
         price = float(self.bars.iloc[self._step]["close"])
+        if self.observation_mode == "price_diffs":
+            # Legacy state: consecutive close differences over the window, exactly
+            # what `Agent.get_state()` produced in agent/5..22 notebooks.
+            start = max(self._step - self.window_size + 1, 0)
+            window = self.bars["close"].iloc[start : self._step + 1].to_numpy(dtype=float)
+            if len(window) < self.window_size:
+                pad = np.full(self.window_size - len(window), window[0], dtype=float)
+                window = np.concatenate([pad, window])
+            diffs = np.diff(window)
+            return diffs.astype(np.float32)
+
         max_shares = self.max_lots * LOT_SIZE
         return np.array(
             [

@@ -19,7 +19,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 import pandas as pd
 
@@ -43,12 +43,14 @@ REQUIRED_DECISION_FIELDS = (
 )
 
 
+@runtime_checkable
 class AlphaModel(Protocol):
     name: str
 
     def score(self, bars: Mapping[str, pd.DataFrame], *, as_of: date) -> pd.Series: ...
 
 
+@runtime_checkable
 class PortfolioConstructor(Protocol):
     name: str
 
