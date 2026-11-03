@@ -7,7 +7,7 @@
 *.egg-info/
 build/
 dist/
-runs/
-data/
-logs/
+/runs/
+/data/
+/logs/
 
