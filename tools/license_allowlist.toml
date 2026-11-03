@@ -1,0 +1,37 @@
+# License allowlist for the `stockpred` package (A-share daily-frequency pipeline).
+#
+# POLICY — read before adding anything here:
+#   * A new dependency MUST first be registered in this file, and its license MUST
+#     be verified by a human (upstream LICENSE file / PyPI metadata) before it is
+#     added to pyproject.toml. No "probably fine" entries.
+#   * Edits here are reviewed like code: a wrong SPDX id silently defeats the CI
+#     gate in tools/check_licenses.py.
+#   * Only permissive licenses are accepted by the gate:
+#       MIT / Apache-2.0 / BSD-2-Clause / BSD-3-Clause / PSF-2.0 / ISC
+#     AGPL / GPL / LGPL / Commons Clause (and similar copyleft or source-available
+#     terms) are rejected — do not register them, the gate will fail the build.
+#
+# Format: [packages] table, `name = "SPDX-ID"`.
+# Names use PEP 503 normalization (lowercase, runs of -_. collapsed to "-").
+#
+# Verification status: VERIFIED = checked against upstream; UNVERIFIED = recorded
+# but not independently confirmed yet (must be confirmed before shipping).
+
+[packages]
+# --- core runtime -----------------------------------------------------------
+pandas = "BSD-3-Clause"            # VERIFIED: pandas is BSD-3-Clause
+numpy = "BSD-3-Clause"             # VERIFIED: numpy is BSD-3-Clause
+pyarrow = "Apache-2.0"             # VERIFIED: pyarrow / Apache Arrow is Apache-2.0
+pandera = "MIT"                    # VERIFIED: pandera is MIT
+python-dateutil = "BSD-3-Clause"   # Dual-licensed Apache-2.0 / BSD-3-Clause; recorded as BSD-3-Clause
+
+# --- optional [data] extra --------------------------------------------------
+akshare = "MIT"                    # VERIFIED: akshare is MIT
+# license unverified: confirm before shipping
+baostock = "Apache-2.0"            # UNVERIFIED — no clear SPDX declaration upstream
+# (baostock ships a vendored/echoing client; re-check the LICENSE file in the
+#  distributed wheel before any production or redistribution use.)
+
+# --- optional [dev] extra ---------------------------------------------------
+pytest = "MIT"
+ruff = "MIT"

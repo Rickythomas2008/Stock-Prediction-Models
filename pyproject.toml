@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stockpred"
+version = "0.1.0"
+description = "A-share daily-frequency prediction and decision support (built on top of the Stock-Prediction-Models fork)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Rickythomas2008" }]
+dependencies = [
+    "pandas>=2.1",
+    "numpy>=1.26",
+    "pyarrow>=14",
+    "pandera>=0.19",
+    "python-dateutil>=2.9",
+]
+
+[project.optional-dependencies]
+# Real data sources. Kept optional so the core package and its tests install
+# without pulling the (large, frequently-changing) vendor clients.
+data = [
+    "akshare>=1.14",
+    "baostock>=0.8",
+]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"*.ipynb" = ["ALL"]
