@@ -376,3 +376,54 @@ def test_order_rejects_odd_lot() -> None:
         Order(date(2024, 3, 4), SYMBOL, "buy", 150)
     with pytest.raises(ValueError):
         Order(date(2024, 3, 4), SYMBOL, "hold", LOT_SIZE)
+
+
+def test_initial_positions_are_valued_and_sellable_on_day_one() -> None:
+    """A continued account starts with holdings, not just cash."""
+    days, bars = _scenario([10.0, 10.5, 11.0], [10.2, 10.7, 11.1])
+    held = run_backtest(
+        bars,
+        [],
+        initial_cash=5_000.0,
+        cost_model=CostModel(),
+        initial_positions={SYMBOL: 300},
+    )
+    assert held.equity_curve.loc[0, "position_shares"] == 300
+    assert held.equity_curve.loc[0, "market_value"] == pytest.approx(300 * 10.2)
+    assert held.equity_curve.loc[0, "equity"] == pytest.approx(5_000.0 + 300 * 10.2)
+
+    sold = run_backtest(
+        bars,
+        [Order(days[0], SYMBOL, "sell", 300)],
+        initial_cash=5_000.0,
+        cost_model=CostModel(),
+        initial_positions={SYMBOL: 300},
+    )
+    assert sold.rejected == []  # settled before the window => T+1 does not block
+    assert len(sold.trades) == 1
+    assert sold.trades[0].side == "sell"
+    assert sold.equity_curve.loc[0, "position_shares"] == 0
+
+
+def test_initial_position_must_be_a_whole_lot() -> None:
+    days, bars = _scenario([10.0, 10.5])
+    with pytest.raises(ValueError, match="whole lot|positive multiple"):
+        run_backtest(
+            bars,
+            [],
+            initial_cash=1_000.0,
+            cost_model=CostModel(),
+            initial_positions={SYMBOL: 150},
+        )
+
+
+def test_initial_position_needs_bars() -> None:
+    days, bars = _scenario([10.0, 10.5])
+    with pytest.raises(ValueError, match="no bars"):
+        run_backtest(
+            bars,
+            [],
+            initial_cash=1_000.0,
+            cost_model=CostModel(),
+            initial_positions={"000001": 100},
+        )

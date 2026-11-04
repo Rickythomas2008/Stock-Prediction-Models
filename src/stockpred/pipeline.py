@@ -131,7 +131,12 @@ class EqualWeightConstructor:
     name: str = "equal_weight"
 
     def construct(
-        self, scores: pd.Series, returns: pd.DataFrame, *, capital: float
+        self,
+        scores: pd.Series,
+        returns: pd.DataFrame,
+        *,
+        capital: float,
+        held: frozenset[str] = frozenset(),
     ) -> pd.Series:
         if scores.empty:
             raise PipelineError("no scores to construct from")
@@ -147,12 +152,65 @@ class TopNConstructor:
     name: str = "top_n"
 
     def construct(
-        self, scores: pd.Series, returns: pd.DataFrame, *, capital: float
+        self,
+        scores: pd.Series,
+        returns: pd.DataFrame,
+        *,
+        capital: float,
+        held: frozenset[str] = frozenset(),
     ) -> pd.Series:
         if scores.empty:
             raise PipelineError("no scores to construct from")
         chosen = scores.sort_values(ascending=False).head(self.top_n)
         weights = pd.Series(1.0 / len(chosen), index=chosen.index, dtype=float)
+        return apply_caps(weights, max_position=self.max_position)
+
+
+@dataclass(frozen=True)
+class BufferedTopNConstructor:
+    """Top-N with a stay band: a holding is kept while it stays in ``top_n + buffer``.
+
+    Re-ranking every period churns the portfolio on tiny score differences;
+    every switch pays commission, stamp duty and slippage twice. Giving incumbents
+    a place in the queue means a challenger must be clearly better to displace
+    them, which is the cheapest turnover reduction that does not change the alpha.
+    """
+
+    top_n: int = 4
+    buffer: int = 2
+    max_position: float = 0.40
+    name: str = "buffered_top_n"
+
+    def __post_init__(self) -> None:
+        if self.top_n <= 0:
+            raise ValueError(f"top_n must be positive, got {self.top_n!r}")
+        if self.buffer < 0:
+            raise ValueError(f"buffer must be non-negative, got {self.buffer!r}")
+
+    def construct(
+        self,
+        scores: pd.Series,
+        returns: pd.DataFrame,
+        *,
+        capital: float,
+        held: frozenset[str] = frozenset(),
+    ) -> pd.Series:
+        if scores.empty:
+            raise PipelineError("no scores to construct from")
+        if self.top_n + self.buffer >= len(scores):
+            raise PipelineError(
+                f"stay band top_n={self.top_n} + buffer={self.buffer} covers all "
+                f"{len(scores)} scored names: holdings could never rotate, which turns the "
+                "strategy into buy-and-hold. Use a smaller buffer."
+            )
+        ranked = scores.sort_values(ascending=False)
+        candidates = list(ranked.head(self.top_n + self.buffer).index)
+        keep = [symbol for symbol in candidates if symbol in held][: self.top_n]
+        fill = [symbol for symbol in candidates if symbol not in keep][: self.top_n - len(keep)]
+        chosen = keep + fill
+        if not chosen:
+            raise PipelineError("stay band produced an empty portfolio")
+        weights = pd.Series(1.0 / len(chosen), index=chosen, dtype=float)
         return apply_caps(weights, max_position=self.max_position)
 
 
@@ -173,8 +231,15 @@ def plan_execution(
     as_of: date,
     prices: Mapping[str, float],
     gate: RiskGate,
+    min_trade_notional: float = 0.0,
 ) -> ExecutionPlan:
-    """Diff target vs current holdings into sell-first, then buy orders."""
+    """Diff target vs current holdings into sell-first, then buy orders.
+
+    ``min_trade_notional`` is the no-trade band: a drift correction smaller than
+    that is skipped, because re-buying every name back to its exact weight each
+    period pays costs for nothing. Exits are never skipped — leaving a position is
+    a decision, not drift.
+    """
     sells: list[Proposal] = []
     buys: list[Proposal] = []
 
@@ -191,9 +256,22 @@ def plan_execution(
             raise PipelineError(f"no usable price for {symbol}")
         if delta < 0:
             shares = min(-delta, current)
-            sells.append(Proposal(as_of, symbol, "sell", shares, float(price)))
+            leaving = target == 0
+            proposal = Proposal(as_of, symbol, "sell", shares, float(price))
         else:
-            buys.append(Proposal(as_of, symbol, "buy", _whole_lots(delta), float(price)))
+            leaving = False
+            proposal = Proposal(as_of, symbol, "buy", _whole_lots(delta), float(price))
+        if (
+            min_trade_notional > 0
+            and not leaving
+            and proposal.shares > 0
+            and proposal.notional < min_trade_notional
+        ):
+            continue
+        if delta < 0:
+            sells.append(proposal)
+        else:
+            buys.append(proposal)
 
     verdicts: dict[str, GateResult] = {}
     ordered: list[Proposal] = []
@@ -244,25 +322,33 @@ class Pipeline:
         prices: Mapping[str, float],
         state: RiskState | None = None,
         returns: pd.DataFrame | None = None,
+        capital: float | None = None,
+        min_trade_notional: float = 0.0,
     ) -> tuple[DecisionPackage, ExecutionPlan]:
         if bar_date > as_of:
             raise PipelineError(f"bar_date {bar_date} is in the future of as_of {as_of}")
 
+        risk_state = state if state is not None else RiskState(cash=self.capital)
+        # Size off live equity when the caller passes it: a rebalance in a running
+        # account must use what the account is worth now, not the day-one capital.
+        budget = float(capital) if capital is not None else self.capital
+
         scores = self.alpha.score(bars, as_of=as_of)
         weights = self.constructor.construct(
-            scores, returns if returns is not None else pd.DataFrame(), capital=self.capital
+            scores,
+            returns if returns is not None else pd.DataFrame(),
+            capital=budget,
+            held=frozenset(risk_state.positions),
         )
-        allocation: Allocation = to_lots(
-            weights, capital=self.capital, prices=dict(prices)
-        )
+        allocation: Allocation = to_lots(weights, capital=budget, prices=dict(prices))
 
-        risk_state = state if state is not None else RiskState(cash=self.capital)
         plan = plan_execution(
             allocation.shares,
             risk_state,
             as_of=as_of,
             prices=prices,
             gate=self.gate,
+            min_trade_notional=min_trade_notional,
         )
 
         refused = {
@@ -356,6 +442,7 @@ def append_decision_log(path, package: DecisionPackage) -> None:
 __all__ = [
     "REQUIRED_DECISION_FIELDS",
     "AlphaModel",
+    "BufferedTopNConstructor",
     "DecisionPackage",
     "EqualWeightConstructor",
     "ExecutionPlan",

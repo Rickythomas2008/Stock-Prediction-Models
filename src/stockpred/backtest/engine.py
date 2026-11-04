@@ -14,8 +14,9 @@ from __future__ import annotations
 
 from bisect import bisect_left, bisect_right
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 import pandas as pd
@@ -122,12 +123,18 @@ def run_backtest(
     cost_model: CostModel,
     st_symbols: set[str] | None = None,
     suspended: dict[str, set[date]] | None = None,
+    initial_positions: Mapping[str, int] | None = None,
 ) -> BacktestResult:
     """Match ``orders`` against ``bars`` day by day and return the equity curve.
 
     Parameters mirror the tech-lead contract. ``suspended`` is the explicit
     halt calendar; a missing bar for a symbol on a session has the same effect,
     which keeps a data gap from being read as a tradeable session.
+
+    ``initial_positions`` seeds settled holdings (bought before the window) so a
+    backtest can continue an existing portfolio instead of restarting from cash.
+    ``initial_cash`` is the cash leg only — it must not already include those
+    holdings' value.
     """
     if initial_cash < 0:
         raise ValueError(f"initial_cash must be non-negative, got {initial_cash!r}")
@@ -137,12 +144,26 @@ def run_backtest(
     halted = {symbol: frozenset(days) for symbol, days in (suspended or {}).items()}
     sessions = sorted({day for history in histories.values() for day in history.days})
 
+    opening = dict(initial_positions or {})
+    for symbol, shares in opening.items():
+        if shares <= 0 or shares % LOT_SIZE != 0:
+            raise ValueError(
+                f"initial position {symbol} must be a positive multiple of {LOT_SIZE}, got {shares!r}"
+            )
+        if symbol not in histories:
+            raise ValueError(f"initial position {symbol} has no bars to value it against")
+
     orders_by_day: dict[date, list[Order]] = defaultdict(list)
     for order in orders:
         orders_by_day[order.date].append(order)
 
     cash = float(initial_cash)
     ledgers: dict[str, T1Ledger] = defaultdict(T1Ledger)
+    if opening and sessions:
+        # Settled lots: dated before the first session so T+1 allows selling on it.
+        seed_day = sessions[0] - timedelta(days=1)
+        for symbol, shares in opening.items():
+            ledgers[symbol].buy(seed_day, shares)
     trades: list[Trade] = []
     rejected: list[dict[str, Any]] = []
     seen: set[tuple[date, str, str]] = set()
