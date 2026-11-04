@@ -66,6 +66,7 @@ from stockpred.eval import (
 from stockpred.eval.walkforward import assert_no_overlap
 from stockpred.pipeline import BufferedTopNConstructor, MomentumAlpha, Pipeline
 from stockpred.risk import Position, RiskGate, RiskLimits, RiskState
+from stockpred.signals.factors import LowVolatilityAlpha, ReversalAlpha
 
 UNIVERSE: tuple[str, ...] = (
     "600519",
@@ -113,6 +114,7 @@ ZERO_COST = replace(
 
 @dataclass(frozen=True)
 class Config:
+    alpha: str = "momentum"
     top: int = TOP_N
     buffer: int = DEFAULT_BUFFER
     band: float = DEFAULT_BAND
@@ -121,7 +123,7 @@ class Config:
 
     def describe(self) -> str:
         return (
-            f"top{self.top} lookback{self.lookback} band{self.band:.0%} "
+            f"{self.alpha}({self.lookback}) top{self.top} band{self.band:.0%} "
             f"stay{self.buffer} test{self.test}"
         )
 
@@ -147,9 +149,21 @@ def index_provider(name: str):
     return AkshareIndexProvider()
 
 
+ALPHAS: tuple[str, ...] = ("momentum", "reversal", "low_vol")
+
+
+def make_alpha(name: str, lookback: int):
+    """Alpha by name; all three are price-only so comparisons share one data path."""
+    if name == "reversal":
+        return ReversalAlpha(lookback=lookback)
+    if name == "low_vol":
+        return LowVolatilityAlpha(lookback=lookback)
+    return MomentumAlpha(lookback=lookback)
+
+
 def build_pipeline(capital: float, config: Config) -> Pipeline:
     return Pipeline(
-        MomentumAlpha(lookback=config.lookback),
+        make_alpha(config.alpha, config.lookback),
         BufferedTopNConstructor(top_n=config.top, buffer=config.buffer, max_position=0.40),
         gate=RiskGate(
             RiskLimits(
@@ -427,6 +441,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--end", default=None, help="window end (YYYY-MM-DD); default today")
     parser.add_argument("--provider", choices=["baostock", "akshare"], default="baostock")
     parser.add_argument("--benchmark", default=BENCHMARK_INDEX, help="index code, e.g. 000300")
+    parser.add_argument("--alpha", choices=list(ALPHAS), default="momentum")
     parser.add_argument("--train", type=int, default=DEFAULT_TRAIN)
     parser.add_argument("--test", type=int, default=DEFAULT_TEST, help="sessions per period")
     parser.add_argument("--top", type=int, default=TOP_N)
@@ -440,7 +455,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     config = Config(
-        top=args.top, buffer=args.buffer, band=args.band, lookback=args.lookback, test=args.test
+        alpha=args.alpha,
+        top=args.top,
+        buffer=args.buffer,
+        band=args.band,
+        lookback=args.lookback,
+        test=args.test,
     )
     window_end = date.fromisoformat(args.end) if args.end else None
     print(f"loading {len(UNIVERSE)} symbols over {args.days} days from {args.provider}")
@@ -504,7 +524,7 @@ def main(argv: list[str] | None = None) -> int:
 
     report = render_report(
         strategy_name=(
-            f"横截面动量({config.lookback}) {config.describe()}，真实 A 股日线"
+            f"{config.alpha} {config.describe()}，真实 A 股日线"
             f"（{args.adjust or 'raw'}，{args.protocol}，{args.provider}）"
         ),
         impact=impact,

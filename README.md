@@ -45,6 +45,8 @@ python -m venv .venv && .venv/Scripts/python -m pip install -e ".[dev]"
 .venv/Scripts/python tools/live_smoke.py      # live fetch + provider cross-check
 .venv/Scripts/python tools/live_universe_run.py --days 90   # 20-symbol live run
 .venv/Scripts/python tools/real_data_eval.py  # real-data walk-forward (needs [data])
+.venv/Scripts/python tools/config_walkforward.py  # alpha + config walk-forward
+.venv/Scripts/python tools/source_parity.py       # akshare vs baostock gate
 ```
 
 No component in this repository places a live order. Automatic order submission

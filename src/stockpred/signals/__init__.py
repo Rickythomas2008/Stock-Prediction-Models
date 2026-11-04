@@ -10,13 +10,16 @@ returns -- the constructors only rank them.
 
 from __future__ import annotations
 
+from stockpred.signals.factors import LowVolatilityAlpha, ReversalAlpha
 from stockpred.signals.pattern import ABCDSignal
 from stockpred.signals.rolling import SignalRollingSignal, signal_rolling_states
 from stockpred.signals.trend import MovingAverageSignal, TurtleSignal
 
 __all__ = [
     "ABCDSignal",
+    "LowVolatilityAlpha",
     "MovingAverageSignal",
+    "ReversalAlpha",
     "SignalRollingSignal",
     "TurtleSignal",
     "signal_rolling_states",
