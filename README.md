@@ -44,6 +44,7 @@ python -m venv .venv && .venv/Scripts/python -m pip install -e ".[dev]"
 .venv/Scripts/python -m pip install -e ".[data]"  # real market-data providers
 .venv/Scripts/python tools/live_smoke.py      # live fetch + provider cross-check
 .venv/Scripts/python tools/live_universe_run.py --days 90   # 20-symbol live run
+.venv/Scripts/python tools/real_data_eval.py  # real-data walk-forward (needs [data])
 ```
 
 No component in this repository places a live order. Automatic order submission
