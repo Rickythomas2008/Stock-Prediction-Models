@@ -1,34 +1,33 @@
 """Real-data walk-forward evaluation: real A-share bars through the decision chain.
 
-Closes TECH-DEBT #7 ("every strategy ranking came from a synthetic random walk"):
-the same decision chain the demos use — ``load_daily_bars`` -> ``Pipeline.decide``
+The same decision chain the demos use — ``load_daily_bars`` -> ``Pipeline.decide``
 (momentum alpha -> buffered top-N -> risk gate) -> ``run_backtest`` (A-share rules
-+ costs) — is driven by **real** akshare bars.
++ costs) — driven by real bars, benchmarked against a **real index** (沪深300 by
+default), because the objective is beating the index, not merely having a
+prettier equity curve.
 
-Two protocols, same signals, so the effect of the accounting is measurable:
+Accounting protocol:
 
 ``continuous`` (default)
     one account: cash and holdings carry from rebalance to rebalance, sized off
-    live equity, orders are target-vs-held diffs. This is what a real account does.
+    live equity, orders are target-vs-held diffs.
 
 ``reset``
-    every rebalance period restarts from ``--capital`` with an empty book — the
-    earlier protocol. It reports the cost of churn that ``continuous`` removes.
+    every period restarts from ``--capital`` with an empty book. Kept only as a
+    control: it neither pays the sell side nor carries positions, so it understates
+    both turnover and cost.
 
-Signals: 20-session momentum, top-N with a stay band (``--buffer``) so an
-incumbent is only displaced by a clearly better name. Rebalance every ``--test``
-sessions; training windows exist to pin the out-of-sample start, not to fit
-parameters (momentum has none).
+Turnover control (alpha untouched): a wide book (``--top``) so one switch is a
+small slice of equity, a stay band (``--buffer``) so incumbents are only displaced
+by clearly better names, and a no-trade band (``--band``) so weight drift is not
+traded.
 
-Prices: 前复权 (qfq) for signal and fill, so dividends do not appear as fake
-jumps — disclosed as a limitation, not hidden.
-
-Read-only w.r.t. the repo except the report. Bars are cached under ``data/cache``.
+Read-only w.r.t. the repo except the report; bars are cached per provider.
 
 Usage:
-    python tools/real_data_eval.py                      # 3 years, continuous
-    python tools/real_data_eval.py --protocol reset     # before/after comparison
-    python tools/real_data_eval.py --buffer 2 --test 20
+    python tools/real_data_eval.py                          # baostock, last 3 years
+    python tools/real_data_eval.py --provider akshare
+    python tools/real_data_eval.py --end 2023-10-31 --days 1095
 
 Requires the ``data`` extra:  pip install -e ".[data]"
 """
@@ -37,7 +36,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -48,7 +47,12 @@ from stockpred.backtest import CostModel, Order, run_backtest
 from stockpred.config import Settings
 from stockpred.data.cache import ParquetCache
 from stockpred.data.loader import load_daily_bars
-from stockpred.data.providers import AkshareProvider
+from stockpred.data.providers import (
+    AkshareIndexProvider,
+    AkshareProvider,
+    BaostockProvider,
+)
+from stockpred.data.schema import validate_bars
 from stockpred.eval import (
     Fold,
     benchmark_warnings,
@@ -86,14 +90,16 @@ UNIVERSE: tuple[str, ...] = (
     "300124",
 )
 
+BENCHMARK_INDEX = "000300"  # 沪深300
 LOOKBACK = 20
 #: 12 names keeps each position near 8% of the book, so one name switch costs ~17%
-#: of equity instead of the 50% a 4-name book pays. That is the turnover lever;
-#: the alpha itself is unchanged.
+#: of equity instead of the 50% a 4-name book pays. That is the turnover lever.
 TOP_N = 12
 DEFAULT_BUFFER = 4
 DEFAULT_BAND = 0.02
 DEFAULT_CAPITAL = 100_000.0
+DEFAULT_TEST = 20
+DEFAULT_TRAIN = 120
 SLIPPAGE_BPS = 5.0
 ZERO_COST = replace(
     CostModel(),
@@ -105,12 +111,46 @@ ZERO_COST = replace(
 )
 
 
-def build_pipeline(
-    capital: float, buffer: int, lookback: int = LOOKBACK, top_n: int = TOP_N
-) -> Pipeline:
+@dataclass(frozen=True)
+class Config:
+    top: int = TOP_N
+    buffer: int = DEFAULT_BUFFER
+    band: float = DEFAULT_BAND
+    lookback: int = LOOKBACK
+    test: int = DEFAULT_TEST
+
+    def describe(self) -> str:
+        return (
+            f"top{self.top} lookback{self.lookback} band{self.band:.0%} "
+            f"stay{self.buffer} test{self.test}"
+        )
+
+
+@dataclass
+class WindowRun:
+    folds: list[Fold]
+    runs: list[dict[str, Any]]
+    net: pd.Series
+    gross: pd.Series
+    traded: float
+
+
+def stock_provider(name: str):
+    if name == "baostock":
+        return BaostockProvider()
+    return AkshareProvider()
+
+
+def index_provider(name: str):
+    if name == "baostock":
+        return BaostockProvider(is_index=True)
+    return AkshareIndexProvider()
+
+
+def build_pipeline(capital: float, config: Config) -> Pipeline:
     return Pipeline(
-        MomentumAlpha(lookback=lookback),
-        BufferedTopNConstructor(top_n=top_n, buffer=buffer, max_position=0.40),
+        MomentumAlpha(lookback=config.lookback),
+        BufferedTopNConstructor(top_n=config.top, buffer=config.buffer, max_position=0.40),
         gate=RiskGate(
             RiskLimits(
                 initial_capital=capital,
@@ -126,25 +166,41 @@ def build_pipeline(
     )
 
 
-def load_universe(days: int, adjust: str, end: date | None = None) -> dict[str, pd.DataFrame]:
+def load_universe(
+    days: int, adjust: str, provider_name: str, end: date | None = None
+) -> dict[str, pd.DataFrame]:
     end = end or date.today()
     start = end - timedelta(days=days)
     cache = ParquetCache(Settings().cache_root)
-    provider = AkshareProvider()
+    provider = stock_provider(provider_name)
     bars: dict[str, pd.DataFrame] = {}
     for symbol in UNIVERSE:
-        try:
-            result = load_daily_bars(
-                symbol, start, end, provider=provider, cache=cache, adjust=adjust
-            )
-        except Exception as exc:  # noqa: BLE001 - one bad symbol must not abort the run
-            print(f"  {symbol}: skipped ({type(exc).__name__}: {exc})")
-            continue
-        bars[symbol] = result.bars
-    print(f"  loaded {len(bars)}/{len(UNIVERSE)} symbols")
+        for attempt in range(3):
+            try:
+                result = load_daily_bars(
+                    symbol, start, end, provider=provider, cache=cache, adjust=adjust
+                )
+            except Exception as exc:  # noqa: BLE001 - vendor endpoints flake; retry then skip
+                if attempt == 2:
+                    print(f"  {symbol}: skipped ({type(exc).__name__}: {str(exc)[:80]})")
+                continue
+            bars[symbol] = result.bars
+            break
+    print(f"  loaded {len(bars)}/{len(UNIVERSE)} symbols from {provider_name}")
     if len(bars) < TOP_N + 1:
         raise SystemExit(f"only {len(bars)} symbols loaded; need at least {TOP_N + 1}")
     return bars
+
+
+def load_benchmark(
+    code: str, bars: dict[str, pd.DataFrame], provider_name: str, adjust: str
+) -> pd.Series:
+    frame = pd.concat([frame[["date", "close"]] for frame in bars.values()], ignore_index=True)
+    start = pd.to_datetime(frame["date"]).min().date()
+    end = pd.to_datetime(frame["date"]).max().date()
+    raw = index_provider(provider_name).fetch_daily(code, start, end)
+    index_bars = validate_bars(raw, symbol=code)
+    return index_bars.set_index(pd.to_datetime(index_bars["date"]))["close"].astype(float)
 
 
 def last_closes(bars: dict[str, pd.DataFrame], day: date) -> dict[str, float]:
@@ -171,14 +227,11 @@ def run_period(
     *,
     previous_session: date,
     capital: float,
-    buffer: int,
+    config: Config,
     protocol: str,
-    band: float,
     books: dict[str, dict[str, Any]],
-    lookback: int = LOOKBACK,
-    top_n: int = TOP_N,
 ) -> dict[str, Any]:
-    """One rebalance: decide, fill through the engine, then roll both books forward.
+    """One rebalance: decide, fill through the engine, roll both books forward.
 
     Two books run on the same orders: ``net`` pays costs and drives the decisions,
     ``gross`` pays nothing. Sharing one book would make the cost comparison a
@@ -205,7 +258,7 @@ def run_period(
         net_opening, net_cash = {}, capital
         gross_opening, gross_cash = {}, capital
 
-    pipeline = build_pipeline(capital, buffer, lookback, top_n)
+    pipeline = build_pipeline(capital, config)
     try:
         package, plan = pipeline.decide(
             bars,
@@ -214,7 +267,7 @@ def run_period(
             prices=prices,
             state=state,
             capital=budget,
-            min_trade_notional=band * budget,
+            min_trade_notional=config.band * budget,
         )
     except Exception as exc:  # noqa: BLE001 - a period with no decision is data, not a crash
         return {"fold": fold, "orders": 0, "refused": 0, "reason": f"{type(exc).__name__}: {exc}"}
@@ -282,10 +335,64 @@ def stitch(runs: list[dict[str, Any]], key: str, capital: float, protocol: str) 
     return pd.concat(pieces)
 
 
-def equal_weight_benchmark(
-    bars: dict[str, pd.DataFrame], index: pd.Index, capital: float
-) -> pd.Series:
-    """Buy-and-hold the universe equal-weight on the same sessions as the strategy."""
+def run_window(
+    bars: dict[str, pd.DataFrame],
+    sessions: list[date],
+    config: Config,
+    *,
+    capital: float = DEFAULT_CAPITAL,
+    protocol: str = "continuous",
+    train: int = DEFAULT_TRAIN,
+    window: tuple[date, date] | None = None,
+) -> WindowRun:
+    """Walk forward over ``sessions``, optionally restricted to a date window."""
+    folds = walk_forward_folds(
+        sessions, train_size=train, test_size=config.test, purge=2, embargo=0
+    )
+    assert_no_overlap(folds)
+    if window is not None:
+        folds = [f for f in folds if window[0] <= f.test_start.date() <= window[1]]
+        if not folds:
+            raise SystemExit(f"no fold starts inside {window[0]}..{window[1]}")
+
+    books: dict[str, dict[str, Any]] = {
+        "net": {"cash": capital, "positions": {}, "peak": capital},
+        "gross": {"cash": capital, "positions": {}, "peak": capital},
+    }
+    runs: list[dict[str, Any]] = []
+    for fold in folds:
+        previous = max(d for d in sessions if d < fold.test_start.date())
+        runs.append(
+            run_period(
+                bars,
+                fold,
+                previous_session=previous,
+                capital=capital,
+                config=config,
+                protocol=protocol,
+                books=books,
+            )
+        )
+    return WindowRun(
+        folds=folds,
+        runs=runs,
+        net=stitch(runs, "net", capital, protocol),
+        gross=stitch(runs, "gross", capital, protocol),
+        traded=sum(float(run.get("traded", 0.0)) for run in runs),
+    )
+
+
+def _curve_on(series: pd.Series, index: pd.Index, capital: float) -> pd.Series:
+    """Rebase a close series onto the strategy's session index."""
+    target = pd.DatetimeIndex(pd.to_datetime(list(index)))
+    aligned = series.reindex(target).ffill().bfill()
+    returns = aligned.pct_change().fillna(0.0)
+    curve = capital * (1.0 + returns).cumprod()
+    curve.index = index
+    return curve
+
+
+def equal_weight_curve(bars: dict[str, pd.DataFrame], index: pd.Index, capital: float) -> pd.Series:
     closes = pd.DataFrame(
         {
             symbol: frame.set_index(pd.to_datetime(frame["date"]))["close"].astype(float)
@@ -297,96 +404,83 @@ def equal_weight_benchmark(
     aligned = returns.reindex(target).fillna(0.0)
     curve = capital * (1.0 + aligned).cumprod()
     curve.index = index
-    return curve.rename("buy_and_hold")
+    return curve
+
+
+def summarise(result: WindowRun, capital: float) -> dict[str, float]:
+    impact = cost_impact(result.gross, result.net, traded_notional=result.traded)
+    return {
+        "net": impact.net.total_return,
+        "gross": impact.gross.total_return,
+        "sharpe": impact.net.sharpe,
+        "max_dd": impact.net.max_drawdown,
+        "turnover_total": impact.net.turnover,
+        "turnover_year": impact.net.turnover / max(impact.net.n_days / 242.0, 1e-9),
+        "days": float(impact.net.n_days),
+        "impact_net": impact.net,  # type: ignore[dict-item]
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--days", type=int, default=1095, help="calendar days of history")
-    parser.add_argument(
-        "--end", default=None, help="window end (YYYY-MM-DD); default today — use it for a "
-        "second, non-overlapping validation window"
-    )
-    parser.add_argument("--train", type=int, default=120, help="sessions before the OOS span")
-    parser.add_argument("--test", type=int, default=20, help="sessions per rebalance period")
-    parser.add_argument(
-        "--buffer", type=int, default=DEFAULT_BUFFER, help="stay band for incumbents"
-    )
-    parser.add_argument(
-        "--band", type=float, default=DEFAULT_BAND, help="no-trade band as a fraction of equity"
-    )
-    parser.add_argument("--lookback", type=int, default=LOOKBACK, help="momentum lookback")
-    parser.add_argument("--top", type=int, default=TOP_N, help="names held per period")
+    parser.add_argument("--end", default=None, help="window end (YYYY-MM-DD); default today")
+    parser.add_argument("--provider", choices=["baostock", "akshare"], default="baostock")
+    parser.add_argument("--benchmark", default=BENCHMARK_INDEX, help="index code, e.g. 000300")
+    parser.add_argument("--train", type=int, default=DEFAULT_TRAIN)
+    parser.add_argument("--test", type=int, default=DEFAULT_TEST, help="sessions per period")
+    parser.add_argument("--top", type=int, default=TOP_N)
+    parser.add_argument("--buffer", type=int, default=DEFAULT_BUFFER)
+    parser.add_argument("--band", type=float, default=DEFAULT_BAND)
+    parser.add_argument("--lookback", type=int, default=LOOKBACK)
     parser.add_argument("--capital", type=float, default=DEFAULT_CAPITAL)
     parser.add_argument("--adjust", default="qfq", help="price adjustment: qfq / hfq / ''")
     parser.add_argument("--protocol", choices=["continuous", "reset"], default="continuous")
     parser.add_argument("--report", default=None)
     args = parser.parse_args(argv)
 
-    print(f"loading {len(UNIVERSE)} symbols over {args.days} days (adjust={args.adjust!r})")
+    config = Config(
+        top=args.top, buffer=args.buffer, band=args.band, lookback=args.lookback, test=args.test
+    )
     window_end = date.fromisoformat(args.end) if args.end else None
-    bars = load_universe(args.days, args.adjust, window_end)
+    print(f"loading {len(UNIVERSE)} symbols over {args.days} days from {args.provider}")
+    bars = load_universe(args.days, args.adjust, args.provider, window_end)
     sessions = sorted({d.date() for frame in bars.values() for d in frame["date"]})
-    print(f"universe {len(bars)} symbols | {len(sessions)} sessions")
-
-    folds = walk_forward_folds(
-        sessions, train_size=args.train, test_size=args.test, purge=2, embargo=0
-    )
-    assert_no_overlap(folds)
+    index_closes = load_benchmark(args.benchmark, bars, args.provider, args.adjust)
     print(
-        f"protocol={args.protocol} top={args.top} buffer={args.buffer} band={args.band:.0%} "
-        f"lookback={args.lookback} | {len(folds)} rebalance periods "
-        f"| OOS {folds[0].test_start.date()}..{folds[-1].test_end.date()}"
+        f"universe {len(bars)} symbols | {len(sessions)} sessions | "
+        f"benchmark {args.benchmark} ({len(index_closes)} bars)"
     )
 
-    books: dict[str, dict[str, Any]] = {
-        "net": {"cash": args.capital, "positions": {}, "peak": args.capital},
-        "gross": {"cash": args.capital, "positions": {}, "peak": args.capital},
+    result = run_window(
+        bars,
+        sessions,
+        config,
+        capital=args.capital,
+        protocol=args.protocol,
+        train=args.train,
+    )
+    print(
+        f"protocol={args.protocol} {config.describe()} | {len(result.folds)} periods "
+        f"| OOS {result.folds[0].test_start.date()}..{result.folds[-1].test_end.date()}"
+    )
+    impact = cost_impact(result.gross, result.net, traded_notional=result.traded)
+
+    index_curve = _curve_on(index_closes, result.net.index, args.capital).rename("benchmark_index")
+    ew_curve = equal_weight_curve(bars, result.net.index, args.capital).rename("equal_weight")
+    cash_curve = pd.Series(args.capital, index=result.net.index, dtype=float).rename("cash")
+    curves = {
+        "strategy_net": result.net,
+        "benchmark_index": index_curve,
+        "equal_weight": ew_curve,
+        "cash": cash_curve,
     }
-    runs: list[dict[str, Any]] = []
-    for fold in folds:
-        previous = max(d for d in sessions if d < fold.test_start.date())
-        run = run_period(
-            bars,
-            fold,
-            previous_session=previous,
-            capital=args.capital,
-            buffer=args.buffer,
-            protocol=args.protocol,
-            band=args.band,
-            books=books,
-            lookback=args.lookback,
-            top_n=args.top,
-        )
-        runs.append(run)
-        result = run.get("net")
-        if result is None:
-            print(f"  {fold.index}: skipped ({run['reason']})")
-            continue
-        end_equity = float(result.equity_curve["equity"].iloc[-1])
-        start_equity = float(result.equity_curve["equity"].iloc[0])
-        print(
-            f"  {fold.index}: orders={run['orders']} refused={run['refused']} "
-            f"period {end_equity - start_equity:+,.0f} -> {end_equity:,.0f}"
-        )
-
-    net_curve = stitch(runs, "net", args.capital, args.protocol)
-    gross_curve = stitch(runs, "gross", args.capital, args.protocol)
-    traded = sum(float(run.get("traded", 0.0)) for run in runs)
-    impact = cost_impact(gross_curve, net_curve, traded_notional=traded)
-
-    benchmark = equal_weight_benchmark(bars, net_curve.index, args.capital)
-    if benchmark.nunique() <= 1:
-        raise SystemExit(
-            "benchmark curve is flat: strategy/benchmark index alignment broke — "
-            "refusing to write a report that would show a 0.00% buy-and-hold"
-        )
-    cash_curve = pd.Series(args.capital, index=net_curve.index, dtype=float).rename("cash")
-    curves = {"strategy_net": net_curve, "buy_and_hold": benchmark, "cash": cash_curve}
     table = pd.DataFrame(
         {
             label: metrics_to_dict(
-                compute_metrics(curve, traded_notional=traded if label == "strategy_net" else 0.0)
+                compute_metrics(
+                    curve, traded_notional=result.traded if label == "strategy_net" else 0.0
+                )
             )
             for label, curve in curves.items()
         }
@@ -394,7 +488,9 @@ def main(argv: list[str] | None = None) -> int:
     # 引擎不记平仓盈亏，一列恒为 0.00% 的 win_rate 只会误导。
     table = table.drop(columns=["win_rate"])
 
-    scored = [run for run in runs if run.get("net") is not None]
+    index_metrics = compute_metrics(index_curve)
+    excess = impact.net.total_return - index_metrics.total_return
+    scored = [run for run in result.runs if run.get("net") is not None]
     positive = sum(
         1
         for run in scored
@@ -402,46 +498,50 @@ def main(argv: list[str] | None = None) -> int:
         > float(run["net"].equity_curve["equity"].iloc[0])
     )
     refusals = pd.Series(
-        [reason for run in runs for reason in (run.get("refusals") or [])], dtype=object
+        [r for run in result.runs for r in (run.get("refusals") or [])], dtype=object
     )
-    dropped = sorted({symbol for run in runs for symbol in (run.get("dropped") or [])})
-    bench_metrics = {
-        "buy_and_hold": compute_metrics(benchmark),
-        "cash": compute_metrics(cash_curve),
-    }
+    dropped = sorted({s for run in result.runs for s in (run.get("dropped") or [])})
 
     report = render_report(
         strategy_name=(
-            f"横截面动量({args.lookback}) top{args.top} stay-band={args.buffer}，"
-            f"真实 A 股日线（{args.adjust or 'raw'}，{args.protocol}）"
+            f"横截面动量({config.lookback}) {config.describe()}，真实 A 股日线"
+            f"（{args.adjust or 'raw'}，{args.protocol}，{args.provider}）"
         ),
         impact=impact,
         benchmark_table=table,
-        folds=folds,
-        traded_notional=traded,
+        folds=result.folds,
+        traded_notional=result.traded,
         extra_notes={
-            "数据源": f"akshare（{len(bars)} 标的，{sessions[0]}..{sessions[-1]}，adjust={args.adjust!r}）",
+            "数据源": f"{args.provider}（{len(bars)} 标的，{sessions[0]}..{sessions[-1]}，"
+            f"adjust={args.adjust!r}）",
+            "基准": f"{args.benchmark} 指数买入持有（目标：跑赢指数，不是跑赢波动）",
+            "超额收益": f"策略净 {impact.net.total_return:+.2%} − 指数 "
+            f"{index_metrics.total_return:+.2%} = **{excess:+.2%}**",
             "协议": (
                 "连续资金：持仓与现金跨期结转，按当期权益定仓，下单为目标-持有差额"
                 if args.protocol == "continuous"
-                else "每期资金重置：每期清空重建，换手与成本被系统性放大"
+                else "每期资金重置：每期清空重建，换手与成本被系统性低估（仅作对照）"
             ),
-            "调仓": f"每 {args.test} 个交易日一次，共 {len(folds)} 次"
-            f"（stay band {args.buffer}，免交易带 {args.band:.0%} 权益）",
+            "调仓": f"每 {config.test} 个交易日一次，共 {len(result.folds)} 次"
+            f"（stay band {config.buffer}，免交易带 {config.band:.0%} 权益）",
             "年化换手": f"{impact.net.turnover / max(impact.net.n_days / 242.0, 1e-9):.0%}"
             f"（总换手 {impact.net.turnover:.0%}，{impact.net.n_days} 个交易日）",
-            "成交": f"下单 {sum(int(run.get('orders', 0)) for run in runs)} 笔，"
-            f"风控拒单 {sum(int(run.get('refused', 0)) for run in runs)} 笔",
+            "成交": f"下单 {sum(int(run.get('orders', 0)) for run in result.runs)} 笔，"
+            f"风控拒单 {sum(int(run.get('refused', 0)) for run in result.runs)} 笔",
             "期间胜率": f"{positive}/{len(scored)} 期为正（{positive / max(len(scored), 1):.0%}）",
             "撮合拒单原因（引擎）": str(refusals.value_counts().to_dict())
             if not refusals.empty
             else "无",
             "整手约束丢弃": "、".join(dropped) if dropped else "无",
             "晋级门": "；".join(failing_gates(impact)) or "通过",
-            "基准警示": "；".join(benchmark_warnings(impact.net, bench_metrics)) or "无",
+            "基准警示": "；".join(
+                benchmark_warnings(
+                    impact.net, {"buy_and_hold": index_metrics, "cash": compute_metrics(cash_curve)}
+                )
+            )
+            or "无",
             "局限": "前复权价格用于撮合（成本按复权价计算）；仅日频、仅做多；"
-            "训练窗只用于确定样本外起点，动量无待拟合参数——"
-            "结论是「这条链在真实数据上是否成立」，不是策略定论",
+            "训练窗只用于确定样本外起点，动量无待拟合参数",
         },
     )
     out = Path(
@@ -457,12 +557,12 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"wrote {out}")
     print(
-        f"net {impact.net.total_return:+.2%} | gross {impact.gross.total_return:+.2%} | "
-        f"net sharpe {impact.net.sharpe:.2f} | max dd {impact.net.max_drawdown:.2%} | "
-        f"turnover {impact.net.turnover:.0%}"
+        f"net {impact.net.total_return:+.2%} | index {index_metrics.total_return:+.2%} | "
+        f"excess {excess:+.2%} | sharpe {impact.net.sharpe:.2f} vs {index_metrics.sharpe:.2f} | "
+        f"max dd {impact.net.max_drawdown:.2%} vs {index_metrics.max_drawdown:.2%} | "
+        f"turnover {impact.net.turnover / max(impact.net.n_days / 242.0, 1e-9):.0%}/yr"
     )
-    print(f"buy_and_hold {bench_metrics['buy_and_hold'].total_return:+.2%}")
-    print(f"gates: {failing_gates(impact) or 'pass'}")
+    print(f"gates: {failing_gates(impact) or 'pass'} | beats_index: {excess > 0}")
     return 0
 
 

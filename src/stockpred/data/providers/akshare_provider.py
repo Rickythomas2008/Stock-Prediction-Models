@@ -69,7 +69,7 @@ class AkshareProvider:
         return [pd.Timestamp(value).date() for value in raw[column]]
 
     @staticmethod
-    def _normalize(raw: pd.DataFrame) -> pd.DataFrame:
+    def _normalize(raw: pd.DataFrame, *, scale_lots: bool = True) -> pd.DataFrame:
         if raw is None or raw.empty:
             raise ProviderUnavailable("akshare returned no rows")
         frame = raw.rename(columns={k: v for k, v in _COLUMN_MAP.items() if k in raw.columns})
@@ -81,6 +81,59 @@ class AkshareProvider:
         for col in ("open", "high", "low", "close", "volume", "amount"):
             if col in frame.columns:
                 frame[col] = pd.to_numeric(frame[col], errors="coerce")
-        if "volume" in frame.columns:
+        if scale_lots and "volume" in frame.columns:
             frame["volume"] = frame["volume"] * _LOT_SIZE
         return frame.sort_values("date", kind="mergesort").reset_index(drop=True)
+
+
+class AkshareIndexProvider:
+    """Index bars (e.g. 沪深300 ``000300``) in the same canonical units.
+
+    Uses the Sina endpoint (one request, full history, 成交量 already in shares)
+    rather than ``index_zh_a_hist``, which pages 17 sub-requests per call and is
+    the first thing to time out under load.
+    """
+
+    name = "akshare_index"
+
+    def __init__(self) -> None:
+        self._ak = None
+
+    def _module(self):
+        if self._ak is None:
+            try:
+                import akshare as ak  # noqa: PLC0415 - optional dependency
+            except ImportError as exc:  # pragma: no cover - exercised only without extra
+                raise ProviderUnavailable(
+                    "akshare is not installed; install with: pip install -e '.[data]'"
+                ) from exc
+            self._ak = ak
+        return self._ak
+
+    def fetch_daily(
+        self,
+        symbol: str,
+        start: date,
+        end: date,
+        *,
+        adjust: str = "",
+    ) -> pd.DataFrame:
+        raw = self._module().stock_zh_index_daily(symbol=_sina_index_code(symbol))
+        frame = AkshareProvider._normalize(raw, scale_lots=False)
+        mask = (frame["date"] >= pd.Timestamp(start)) & (frame["date"] <= pd.Timestamp(end))
+        return frame.loc[mask].reset_index(drop=True)
+
+    def trading_calendar(self) -> Sequence[date]:
+        return AkshareProvider().trading_calendar()
+
+
+def _sina_index_code(symbol: str) -> str:
+    """``000300`` -> ``sh000300``; ``399006`` -> ``sz399006``; ``sh.000300`` passes through."""
+    text = symbol.strip().lower().replace(".", "")
+    if text.startswith(("sh", "sz")):
+        return text
+    if text.startswith("000"):
+        return f"sh{text}"
+    if text.startswith("399"):
+        return f"sz{text}"
+    raise ValueError(f"unsupported A-share index code: {symbol!r}")

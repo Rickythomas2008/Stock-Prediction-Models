@@ -20,8 +20,13 @@ from stockpred.errors import ProviderUnavailable
 _FIELDS = "date,open,high,low,close,volume,amount"
 
 
-def to_baostock_code(symbol: str) -> str:
-    """Map ``600519`` / ``600519.SH`` / ``sh.600519`` to baostock's ``sh.600519``."""
+def to_baostock_code(symbol: str, *, index: bool = False) -> str:
+    """Map ``600519`` / ``600519.SH`` / ``sh.600519`` to baostock's ``sh.600519``.
+
+    ``index=True`` switches to the index namespace: ``000300`` is 沪深300 on the
+    Shanghai exchange, so the ``000`` prefix that means Shenzhen for a stock means
+    Shanghai here. Getting this backwards silently returns an empty result.
+    """
     text = symbol.strip().lower()
     if "." in text:
         head, tail = text.split(".", 1)
@@ -30,6 +35,12 @@ def to_baostock_code(symbol: str) -> str:
         if tail in {"sh", "sz"}:
             return f"{tail}.{head}"
         raise ValueError(f"cannot map symbol to a baostock code: {symbol!r}")
+    if index:
+        if text.startswith("000"):
+            return f"sh.{text}"
+        if text.startswith("399"):
+            return f"sz.{text}"
+        raise ValueError(f"unsupported A-share index code: {symbol!r}")
     if text.startswith("6"):
         return f"sh.{text}"
     if text.startswith(("0", "3")):
@@ -40,8 +51,13 @@ def to_baostock_code(symbol: str) -> str:
 class BaostockProvider:
     name = "baostock"
 
-    def __init__(self) -> None:
+    def __init__(self, *, is_index: bool = False) -> None:
         self._bs = None
+        self._is_index = is_index
+
+    @property
+    def is_index(self) -> bool:
+        return self._is_index
 
     def _module(self):
         if self._bs is None:
@@ -68,7 +84,7 @@ class BaostockProvider:
             raise ProviderUnavailable(f"baostock login failed: {getattr(login, 'error_msg', '')}")
         try:
             result = bs.query_history_k_data_plus(
-                to_baostock_code(symbol),
+                to_baostock_code(symbol, index=self._is_index),
                 _FIELDS,
                 start_date=start.isoformat(),
                 end_date=end.isoformat(),

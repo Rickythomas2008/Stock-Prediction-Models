@@ -25,6 +25,19 @@ class BadProvider:
         return []
 
 
+def test_cached_read_refuses_another_vendors_snapshot(
+    tmp_path: Path, fake_provider, bars: pd.DataFrame
+) -> None:
+    """Cache keys are provider-agnostic, so the manifest source has to be checked."""
+    cache = ParquetCache(tmp_path)
+    window = (bars["date"].min().date(), bars["date"].max().date())
+    load_daily_bars("600519", *window, provider=fake_provider, cache=cache)
+
+    with pytest.raises(DataQualityError, match="not 'baostock'"):
+        read_cached_bars(cache, "600519", source="baostock")
+    assert len(read_cached_bars(cache, "600519", source="fake").bars) == len(bars)
+
+
 def test_fake_provider_satisfies_contract(fake_provider) -> None:
     assert isinstance(fake_provider, MarketDataProvider)
 

@@ -14,6 +14,7 @@ import pandas as pd
 from stockpred.data.cache import CacheWrite, ParquetCache
 from stockpred.data.providers.base import MarketDataProvider
 from stockpred.data.schema import validate_bars
+from stockpred.errors import DataQualityError
 
 
 @dataclass(frozen=True)
@@ -50,14 +51,29 @@ def load_daily_bars(
     return LoadResult(symbol=symbol, adjust=adjust, bars=bars, cache_write=write)
 
 
-def read_cached_bars(cache: ParquetCache, symbol: str, adjust: str = "") -> LoadResult:
-    bars, manifest = cache.load(cache_key(symbol, adjust))
+def read_cached_bars(
+    cache: ParquetCache, symbol: str, adjust: str = "", *, source: str | None = None
+) -> LoadResult:
+    """Read a cached snapshot; ``source`` refuses a snapshot written by another vendor.
+
+    The manifest already records which provider produced the bars, so asking for
+    ``source="baostock"`` cannot silently return an akshare snapshot just because
+    both used the same cache key.
+    """
+    key = cache_key(symbol, adjust)
+    bars, manifest = cache.load(key)
+    recorded = manifest.get("source")
+    if source is not None and recorded not in (None, source):
+        raise DataQualityError(
+            f"cached bars for {symbol} came from {recorded!r}, not {source!r}; "
+            "re-fetch instead of mixing vendors"
+        )
     return LoadResult(
         symbol=symbol,
         adjust=adjust,
         bars=validate_bars(bars, symbol=symbol),
         cache_write=CacheWrite(
-            path=cache.root / cache_key(symbol, adjust) / manifest["file"],
+            path=cache.root / key / manifest["file"],
             content_hash=manifest["content_hash"],
             written=False,
             rows=int(manifest["rows"]),
