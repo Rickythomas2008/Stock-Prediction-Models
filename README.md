@@ -31,6 +31,7 @@ A-share decision system lives in `src/stockpred` and is documented separately:
 | Purged CV and triple-barrier labeling | [docs/PURGED-CV.md](docs/PURGED-CV.md) |
 | Broker inquiry template (written answers only) | [docs/BROKER-INQUIRY.md](docs/BROKER-INQUIRY.md) |
 | Known debt and open items | [docs/TECH-DEBT.md](docs/TECH-DEBT.md) |
+| **Project closeout (2026-11-05): why it closed, what it proved, how to restart** | [docs/CLOSEOUT-2026-11-05.md](docs/CLOSEOUT-2026-11-05.md) |
 | Retro (S6) | [docs/RETRO-S6.md](docs/RETRO-S6.md) |
 | Spikes: TimesFM / qlib, with the actual numbers | [docs/SPIKE-TSFM.md](docs/SPIKE-TSFM.md), [docs/SPIKE-QLIB.md](docs/SPIKE-QLIB.md) |
 
@@ -54,6 +55,12 @@ python -m venv .venv && .venv/Scripts/python -m pip install -e ".[dev]"
 No component in this repository places a live order. Automatic order submission
 requires a signed broker confirmation of the program-trading filing
 (CSRC 2024 No.8, art.8) and is not implemented.
+
+> **Project closed 2026-11-05.** The broker's QMT/miniQMT permission carries a
+> capital threshold this account does not meet, so the compliant auto-execution path
+> was unreachable. Everything below still runs (data, evaluation, paper trading,
+> gates); read [docs/CLOSEOUT-2026-11-05.md](docs/CLOSEOUT-2026-11-05.md) first —
+> it lists what was falsified and what would justify restarting.
 
 ## Table of contents
   * [Models](#models)
