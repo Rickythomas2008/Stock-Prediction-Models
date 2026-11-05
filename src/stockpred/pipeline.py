@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from typing import Protocol, runtime_checkable
 
+import numpy as np
 import pandas as pd
 
 from stockpred.backtest.rules import LOT_SIZE
@@ -215,6 +216,50 @@ class BufferedTopNConstructor:
 
 
 @dataclass(frozen=True)
+class TiltedIndexConstructor:
+    """Index enhancement: start from the benchmark weights, tilt by score, stay close.
+
+    ``w_i ∝ bench_i * exp(tilt * z_i)`` where ``z`` is the cross-sectional z-score of
+    the alpha and ``tilt`` is in units of "log-weight per sigma". ``tilt=0``
+    reproduces the index; larger values buy more active risk. Names outside the
+    benchmark are ignored — an enhanced index that leaves its own universe is just
+    an active fund with a tracking-error footnote.
+    """
+
+    benchmark_weights: Mapping[str, float]
+    tilt: float = 0.5
+    max_position: float = 0.10
+    name: str = "tilted_index"
+
+    def construct(
+        self,
+        scores: pd.Series,
+        returns: pd.DataFrame,
+        *,
+        capital: float,
+        held: frozenset[str] = frozenset(),
+    ) -> pd.Series:
+        if scores.empty:
+            raise PipelineError("no scores to construct from")
+        pool = [symbol for symbol in scores.index if symbol in self.benchmark_weights]
+        if not pool:
+            raise PipelineError("no scored symbol is in the benchmark")
+        bench = pd.Series(
+            {symbol: float(self.benchmark_weights[symbol]) for symbol in pool}, dtype=float
+        )
+        bench = bench / bench.sum()
+
+        values = scores.loc[pool].astype(float)
+        spread = float(values.std(ddof=0))
+        if spread <= 0:
+            return apply_caps(bench, max_position=self.max_position)
+        z = (values - values.mean()) / spread
+        tilted = bench * np.exp(self.tilt * z)
+        tilted = tilted / tilted.sum()
+        return apply_caps(tilted, max_position=self.max_position)
+
+
+@dataclass(frozen=True)
 class ExecutionPlan:
     proposals: tuple[Proposal, ...]
     verdicts: dict[str, GateResult]
@@ -306,7 +351,10 @@ class Pipeline:
         # A constructor that targets more than the gate permits would have every
         # order refused -- a silent dead pipeline. Fail at wiring time instead.
         constructor_cap = getattr(constructor, "max_position", None)
-        if constructor_cap is not None and constructor_cap > self.gate.limits.max_position_pct + 1e-9:
+        if (
+            constructor_cap is not None
+            and constructor_cap > self.gate.limits.max_position_pct + 1e-9
+        ):
             raise PipelineError(
                 f"{constructor.name} targets up to {constructor_cap:.0%} per name but the risk "
                 f"gate caps positions at {self.gate.limits.max_position_pct:.0%}; "
@@ -357,7 +405,9 @@ class Pipeline:
             if verdict.refused
         }
         executed = sum(
-            proposal.notional for proposal in plan.proposals if plan.verdicts[proposal.symbol].approved
+            proposal.notional
+            for proposal in plan.proposals
+            if plan.verdicts[proposal.symbol].approved
         )
         rationale = _rationale(self.alpha.name, self.constructor.name, scores, allocation, refused)
 
@@ -450,6 +500,7 @@ __all__ = [
     "Pipeline",
     "PipelineError",
     "PortfolioConstructor",
+    "TiltedIndexConstructor",
     "TopNConstructor",
     "append_decision_log",
     "plan_execution",

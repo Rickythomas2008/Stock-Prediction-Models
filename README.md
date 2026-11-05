@@ -47,6 +47,7 @@ python -m venv .venv && .venv/Scripts/python -m pip install -e ".[dev]"
 .venv/Scripts/python tools/real_data_eval.py  # real-data walk-forward (needs [data])
 .venv/Scripts/python tools/config_walkforward.py  # alpha + config walk-forward
 .venv/Scripts/python tools/source_parity.py       # akshare vs baostock gate
+.venv/Scripts/python tools/index_enhance.py --pool 30 --capital 10000000   # index enhancement
 ```
 
 No component in this repository places a live order. Automatic order submission

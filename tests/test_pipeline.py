@@ -15,6 +15,7 @@ from stockpred.pipeline import (
     MomentumAlpha,
     Pipeline,
     PipelineError,
+    TiltedIndexConstructor,
     TopNConstructor,
     append_decision_log,
     plan_execution,
@@ -196,7 +197,9 @@ def test_plan_execution_skips_unchanged_positions(bars, prices) -> None:
 
 def test_plan_execution_requires_price(bars) -> None:
     with pytest.raises(PipelineError, match="no usable price"):
-        plan_execution({"600519": 100}, RiskState(cash=10_000.0), as_of=AS_OF, prices={}, gate=RiskGate())
+        plan_execution(
+            {"600519": 100}, RiskState(cash=10_000.0), as_of=AS_OF, prices={}, gate=RiskGate()
+        )
 
 
 def test_decision_log_is_append_only(tmp_path: Path, bars, prices) -> None:
@@ -311,9 +314,7 @@ def test_pipeline_feeds_holdings_into_the_constructor(bars, prices) -> None:
     state = RiskState(cash=50_000.0)
     state.positions[incumbent] = Position(incumbent, 100, prices[incumbent])
 
-    package, _plan = pipeline.decide(
-        bars, as_of=AS_OF, bar_date=AS_OF, prices=prices, state=state
-    )
+    package, _plan = pipeline.decide(bars, as_of=AS_OF, bar_date=AS_OF, prices=prices, state=state)
 
     assert incumbent in package.target_shares
 
@@ -343,3 +344,45 @@ def test_decide_sizes_off_the_supplied_equity(bars, prices) -> None:
     )
 
     assert doubled.target_invested > base.target_invested
+
+
+def test_tilted_index_with_zero_tilt_reproduces_the_benchmark() -> None:
+    scores = pd.Series({"A": 0.05, "B": -0.02, "C": 0.01})
+    weights = TiltedIndexConstructor(
+        benchmark_weights={"A": 0.5, "B": 0.3, "C": 0.2}, tilt=0.0, max_position=1.0
+    ).construct(scores, pd.DataFrame(), capital=1_000_000.0)
+
+    assert weights["A"] == pytest.approx(0.5)
+    assert weights["B"] == pytest.approx(0.3)
+    assert float(weights.sum()) == pytest.approx(1.0)
+
+
+def test_tilted_index_overweights_the_better_score() -> None:
+    scores = pd.Series({"A": 0.05, "B": 0.0, "C": -0.05})
+    base = TiltedIndexConstructor(
+        benchmark_weights={"A": 1 / 3, "B": 1 / 3, "C": 1 / 3}, tilt=0.0, max_position=1.0
+    ).construct(scores, pd.DataFrame(), capital=1_000_000.0)
+    tilted = TiltedIndexConstructor(
+        benchmark_weights={"A": 1 / 3, "B": 1 / 3, "C": 1 / 3}, tilt=0.5, max_position=1.0
+    ).construct(scores, pd.DataFrame(), capital=1_000_000.0)
+
+    assert tilted["A"] > base["A"]
+    assert tilted["C"] < base["C"]
+    assert float(tilted.sum()) == pytest.approx(1.0)
+
+
+def test_tilted_index_ignores_names_outside_the_benchmark() -> None:
+    scores = pd.Series({"A": 0.05, "OUTSIDE": 5.0})
+    weights = TiltedIndexConstructor(
+        benchmark_weights={"A": 1.0}, tilt=1.0, max_position=1.0
+    ).construct(scores, pd.DataFrame(), capital=1_000_000.0)
+
+    assert list(weights.index) == ["A"]
+
+
+def test_tilted_index_needs_an_overlap() -> None:
+    scores = pd.Series({"OUTSIDE": 0.05})
+    with pytest.raises(PipelineError, match="in the benchmark"):
+        TiltedIndexConstructor(benchmark_weights={"A": 1.0}).construct(
+            scores, pd.DataFrame(), capital=1_000_000.0
+        )

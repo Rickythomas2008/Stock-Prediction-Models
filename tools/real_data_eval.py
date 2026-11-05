@@ -64,7 +64,12 @@ from stockpred.eval import (
     walk_forward_folds,
 )
 from stockpred.eval.walkforward import assert_no_overlap
-from stockpred.pipeline import BufferedTopNConstructor, MomentumAlpha, Pipeline
+from stockpred.pipeline import (
+    BufferedTopNConstructor,
+    MomentumAlpha,
+    Pipeline,
+    TiltedIndexConstructor,
+)
 from stockpred.risk import Position, RiskGate, RiskLimits, RiskState
 from stockpred.signals.factors import LowVolatilityAlpha, ReversalAlpha
 
@@ -120,8 +125,12 @@ class Config:
     band: float = DEFAULT_BAND
     lookback: int = LOOKBACK
     test: int = DEFAULT_TEST
+    mode: str = "topn"  # "topn" (active book) or "index" (tilt around benchmark weights)
+    tilt: float = 0.0
 
     def describe(self) -> str:
+        if self.mode == "index":
+            return f"{self.alpha}({self.lookback}) index-tilt{self.tilt:g} test{self.test}"
         return (
             f"{self.alpha}({self.lookback}) top{self.top} band{self.band:.0%} "
             f"stay{self.buffer} test{self.test}"
@@ -161,9 +170,29 @@ def make_alpha(name: str, lookback: int):
     return MomentumAlpha(lookback=lookback)
 
 
-def build_pipeline(capital: float, config: Config) -> Pipeline:
+def build_pipeline(
+    capital: float, config: Config, weights: dict[str, float] | None = None
+) -> Pipeline:
+    alpha = make_alpha(config.alpha, config.lookback)
+    if config.mode == "index":
+        if not weights:
+            raise SystemExit("index mode needs benchmark weights")
+        constructor = TiltedIndexConstructor(
+            benchmark_weights=weights, tilt=config.tilt, max_position=0.15
+        )
+        limits = RiskLimits(
+            initial_capital=capital,
+            max_position_pct=0.15,
+            max_single_order_pct=0.15,
+            max_gross_exposure_pct=1.0,
+            max_turnover_per_month_pct=200.0,
+            max_orders_per_day=len(weights) + 5,
+            min_cash_buffer_pct=0.01,
+        )
+        return Pipeline(alpha, constructor, gate=RiskGate(limits), capital=capital)
+
     return Pipeline(
-        make_alpha(config.alpha, config.lookback),
+        alpha,
         BufferedTopNConstructor(top_n=config.top, buffer=config.buffer, max_position=0.40),
         gate=RiskGate(
             RiskLimits(
@@ -244,6 +273,7 @@ def run_period(
     config: Config,
     protocol: str,
     books: dict[str, dict[str, Any]],
+    weights: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     """One rebalance: decide, fill through the engine, roll both books forward.
 
@@ -272,7 +302,7 @@ def run_period(
         net_opening, net_cash = {}, capital
         gross_opening, gross_cash = {}, capital
 
-    pipeline = build_pipeline(capital, config)
+    pipeline = build_pipeline(capital, config, weights)
     try:
         package, plan = pipeline.decide(
             bars,
@@ -358,6 +388,7 @@ def run_window(
     protocol: str = "continuous",
     train: int = DEFAULT_TRAIN,
     window: tuple[date, date] | None = None,
+    weights: dict[str, float] | None = None,
 ) -> WindowRun:
     """Walk forward over ``sessions``, optionally restricted to a date window."""
     folds = walk_forward_folds(
@@ -385,6 +416,7 @@ def run_window(
                 config=config,
                 protocol=protocol,
                 books=books,
+                weights=weights,
             )
         )
     return WindowRun(
