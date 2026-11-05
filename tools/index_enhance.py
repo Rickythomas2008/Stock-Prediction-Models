@@ -1,27 +1,26 @@
-"""Index enhancement: tilt inside the benchmark, then measure tracking error and IR.
+"""Index enhancement against a **tradeable** benchmark: core ETF + tilted sleeve.
 
-This replaces "pick 12 of 20 names and hope" with the product the objective actually
-asks for: stay inside an index, deviate deliberately, and report how much tracking
-risk that deviation cost.
+The earlier version benchmarked against 沪深300 itself, which nobody can hold — and
+against a "pool at index weights", which turned out to be a large-cap bet rather
+than an index (the pool drifted +69pp from the index in three years). Both made the
+self-check meaningless: with weight-theoretic references, `tilt=0` could not
+reproduce its own benchmark.
 
-Method:
-  * pool    = 沪深300 constituents, ranked by index weight (``--pool`` largest)
-  * weights = index weights; ``w_i ∝ bench_i · exp(tilt · z_i)`` where ``z`` is the
-              cross-sectional z-score of the alpha
-  * tilt = 0 reproduces the benchmark, so the same harness measures both ends
-  * rebalance every ``--test`` sessions, continuous capital, same A-share frictions
-    and the same no-trade band as the active book
+So the benchmark is now **510300 (沪深300ETF)**, bought and held. It is tradeable,
+its lots are ~4 CNY × 100 units (rounding is negligible), and it tracks the index
+by construction. The enhanced product is a core-satellite blend:
 
-Reported per tilt: net return, active return vs index, **tracking error**
-(annualised stdev of daily active returns) and **information ratio**.
+    r = (1 - alpha) * r_etf + alpha * r_sleeve(tilt)
 
-Limitations, stated up front: one weight snapshot is used for the whole window
-(index rebalances are ignored), the pool is the largest N constituents rather than
-all 300, and only the tilts listed are tried.
+`alpha = 0` is a pure ETF holding, so the self-check row must show ~0 active return
+and ~0 tracking error **by construction** — if it does not, the accounting is broken.
+
+Reported per (alpha, tilt): net, active vs ETF, tracking error, information ratio,
+plus the sleeve's own turnover scaled by alpha.
 
 Usage:
-    python tools/index_enhance.py --pool 50 --days 1095
-    python tools/index_enhance.py --provider akshare --tilts 0,0.25,0.5,1.0
+    python tools/index_enhance.py --pool 30 --sleeves 0,0.2,0.4 --tilt 0.5
+    python tools/index_enhance.py --provider akshare --etf 510300 --days 1095
 
 Requires the ``data`` extra:  pip install -e ".[data]"
 """
@@ -42,6 +41,7 @@ import real_data_eval as rde  # noqa: E402
 
 from stockpred.data.adjust import forward_adjusted  # noqa: E402
 from stockpred.data.dividends import load_akshare_actions  # noqa: E402
+from stockpred.data.providers.akshare_provider import AkshareProvider  # noqa: E402
 from stockpred.data.schema import validate_bars  # noqa: E402
 from stockpred.eval import compute_metrics  # noqa: E402
 
@@ -144,10 +144,6 @@ def load_pool_bars(
     if len(bars) < 10:
         raise SystemExit(f"only {len(bars)} constituents loaded; too few for an index book")
 
-    # A 100-share lot of 茅台 costs more than a 5% slice of 1M: the book cannot hold
-    # every constituent, so both the strategy and its reference start from the names
-    # that are actually affordable — otherwise tilt=0 would show tracking error that
-    # is purely a lot-size artefact.
     affordable: dict[str, float] = {}
     for symbol, weight in weights.items():
         if symbol not in bars:
@@ -163,41 +159,32 @@ def load_pool_bars(
     return bars, {symbol: weight / total for symbol, weight in affordable.items()}
 
 
-def scheduled_reference(
-    bars: dict[str, pd.DataFrame],
-    weights: dict[str, float],
-    folds,
-    capital: float,
-) -> pd.Series:
-    """Reference portfolio rebalanced on the strategy's own schedule.
+def load_etf(etf: str, start: date, end: date) -> pd.Series:
+    """510300 daily closes (qfq) — the benchmark we can actually buy."""
+    import akshare as ak  # noqa: PLC0415 - optional dependency
 
-    Comparing against a daily-rebalanced basket would charge the strategy for
-    rebalancing monthly, which is the design, not the deviation. Same schedule and
-    buy-and-hold within a period ⇒ the remaining tracking error is what the tilt cost.
-    """
-    pieces: list[pd.Series] = []
-    running = capital
-    for fold in folds:
-        start, end = fold.test_start.date(), fold.test_end.date()
-        closes: dict[str, pd.Series] = {}
-        for symbol, frame in bars.items():
-            mask = (frame["date"].dt.date >= start) & (frame["date"].dt.date <= end)
-            window = frame.loc[mask, ["date", "close"]]
-            if len(window) < 2:
-                continue
-            closes[symbol] = window.set_index(pd.to_datetime(window["date"]))["close"].astype(float)
-        if not closes:
-            continue
-        frame = pd.DataFrame(closes).sort_index()
-        returns = frame.pct_change().fillna(0.0)
-        weight_series = pd.Series(weights, dtype=float).reindex(frame.columns).fillna(0.0)
-        period_returns = (returns * weight_series).sum(axis=1)
-        curve = running * (1.0 + period_returns).cumprod()
-        running = float(curve.iloc[-1])
-        pieces.append(curve)
-    if not pieces:
-        raise SystemExit("reference portfolio produced no curve")
-    return pd.concat(pieces).rename("reference")
+    raw = ak.fund_etf_hist_em(
+        symbol=etf,
+        period="daily",
+        start_date=start.strftime("%Y%m%d"),
+        end_date=end.strftime("%Y%m%d"),
+        adjust="qfq",
+    )
+    frame = AkshareProvider._normalize(raw)
+    frame = validate_bars(frame, symbol=etf)
+    print(
+        f"  etf {etf}: {len(frame)} bars {frame['date'].iloc[0].date()}..{frame['date'].iloc[-1].date()}"
+    )
+    return frame.set_index(pd.to_datetime(frame["date"]))["close"].astype(float)
+
+
+def etf_curve(closes: pd.Series, index: pd.Index, capital: float) -> pd.Series:
+    target = pd.DatetimeIndex(pd.to_datetime(list(index)))
+    aligned = closes.reindex(target).ffill().bfill()
+    returns = aligned.pct_change().fillna(0.0)
+    curve = capital * (1.0 + returns).cumprod()
+    curve.index = index
+    return curve.rename("etf")
 
 
 def active_stats(net: pd.Series, bench: pd.Series) -> tuple[float, float, float]:
@@ -205,8 +192,7 @@ def active_stats(net: pd.Series, bench: pd.Series) -> tuple[float, float, float]
     aligned = pd.concat([net.rename("net"), bench.rename("bench")], axis=1).dropna()
     if len(aligned) < 3:
         return 0.0, 0.0, 0.0
-    active_daily = aligned["net"].pct_change() - aligned["bench"].pct_change()
-    active_daily = active_daily.dropna()
+    active_daily = (aligned["net"].pct_change() - aligned["bench"].pct_change()).dropna()
     tracking_error = float(active_daily.std(ddof=1) * math.sqrt(TRADING_DAYS))
     active_return = float(aligned["net"].iloc[-1] / aligned["net"].iloc[0] - 1.0) - float(
         aligned["bench"].iloc[-1] / aligned["bench"].iloc[0] - 1.0
@@ -217,30 +203,40 @@ def active_stats(net: pd.Series, bench: pd.Series) -> tuple[float, float, float]
     return active_return, tracking_error, ir
 
 
+def blend(etf: pd.Series, sleeve: pd.Series, alpha: float, capital: float) -> pd.Series:
+    """(1-alpha)·ETF + alpha·sleeve. At alpha=0 this must equal the ETF curve."""
+    aligned = pd.concat([etf.rename("etf"), sleeve.rename("sleeve")], axis=1).dropna()
+    etf_returns = aligned["etf"].pct_change().fillna(0.0)
+    sleeve_returns = aligned["sleeve"].pct_change().fillna(0.0)
+    mixed = (1.0 - alpha) * etf_returns + alpha * sleeve_returns
+    curve = capital * (1.0 + mixed).cumprod()
+    return curve.rename("blend")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--pool", type=int, default=50, help="largest N constituents to trade")
+    parser.add_argument("--pool", type=int, default=30, help="largest N constituents to trade")
     parser.add_argument("--days", type=int, default=1095)
     parser.add_argument("--end", default=None)
-    parser.add_argument("--provider", choices=["baostock", "akshare"], default="baostock")
+    parser.add_argument("--provider", choices=["baostock", "akshare"], default="akshare")
+    parser.add_argument("--etf", default="510300", help="benchmark ETF (tradeable)")
     parser.add_argument("--alpha", choices=list(rde.ALPHAS), default="low_vol")
     parser.add_argument("--lookback", type=int, default=60)
     parser.add_argument("--test", type=int, default=20, help="sessions per rebalance")
-    parser.add_argument("--tilts", default="0,0.25,0.5,1.0")
+    parser.add_argument("--sleeves", default="0,0.2,0.4", help="sleeve weights (0 = pure ETF)")
+    parser.add_argument("--tilt", type=float, default=0.5)
     parser.add_argument(
-        "--band",
-        type=float,
-        default=0.002,
-        help="no-trade band as a fraction of equity; index books need a much tighter "
-        "band than a 12-name active book or the weights simply drift",
+        "--compare-tilt", type=float, default=0.0, help="extra tilt row at max sleeve"
     )
-    parser.add_argument("--capital", type=float, default=rde.DEFAULT_CAPITAL)
+    parser.add_argument("--capital", type=float, default=10_000_000.0)
+    parser.add_argument("--band", type=float, default=0.002, help="sleeve no-trade band")
     parser.add_argument("--no-self-adjust", action="store_true", help="use vendor qfq instead")
     parser.add_argument("--report", default="docs/INDEX-ENHANCE.md")
     args = parser.parse_args(argv)
 
     end = date.fromisoformat(args.end) if args.end else date.today()
-    print(f"building index book for {rde.BENCHMARK_INDEX} from {args.provider}")
+    start = end - timedelta(days=args.days)
+    print(f"index enhancement: benchmark {args.etf}, pool from {rde.BENCHMARK_INDEX}")
     weights = constituents(args.provider, args.pool)
     bars, weights = load_pool_bars(
         weights,
@@ -251,103 +247,108 @@ def main(argv: list[str] | None = None) -> int:
         capital=args.capital,
     )
     sessions = sorted({d.date() for frame in bars.values() for d in frame["date"]})
+    etf_closes = load_etf(args.etf, start, end)
     index_closes = rde.load_benchmark(rde.BENCHMARK_INDEX, bars, args.provider, "")
-    print(
-        f"pool {len(bars)} names | {len(sessions)} sessions | "
-        f"adjust={'self-computed qfq' if not args.no_self_adjust else 'vendor qfq'}"
-    )
+    print(f"pool {len(bars)} names | {len(sessions)} sessions | sleeve capital {args.capital:,.0f}")
+
+    sleeves = [float(value) for value in args.sleeves.split(",") if value.strip()]
+    plan = [(alpha, args.tilt) for alpha in sleeves]
+    max_sleeve = max(sleeves) if sleeves else 0.0
+    if max_sleeve > 0 and args.compare_tilt != args.tilt:
+        plan.append((max_sleeve, args.compare_tilt))
 
     rows: list[dict[str, object]] = []
-    reference_seen: pd.Series | None = None
-    for tilt in [float(t) for t in args.tilts.split(",") if t.strip()]:
-        config = rde.Config(
-            alpha=args.alpha,
-            lookback=args.lookback,
-            test=args.test,
-            band=args.band,
-            mode="index",
-            tilt=tilt,
-        )
-        result = rde.run_window(
-            bars, sessions, config, capital=args.capital, protocol="continuous", weights=weights
-        )
-        metrics = compute_metrics(result.net, traded_notional=result.traded)
-        reference = scheduled_reference(bars, weights, result.folds, args.capital)
-        reference_seen = reference
-        index_curve = rde._curve_on(index_closes, result.net.index, args.capital)
-        active, te, ir = active_stats(result.net, reference)
-        vs_index = float(result.net.iloc[-1] / result.net.iloc[0] - 1.0) - float(
-            index_curve.iloc[-1] / index_curve.iloc[0] - 1.0
-        )
-        years = max(metrics.n_days / TRADING_DAYS, 1e-9)
+    cache: dict[float, pd.Series] = {}
+    for alpha, tilt in plan:
+        if tilt not in cache:
+            config = rde.Config(
+                alpha=args.alpha,
+                lookback=args.lookback,
+                test=args.test,
+                band=args.band,
+                mode="index",
+                tilt=tilt,
+            )
+            result = rde.run_window(
+                bars, sessions, config, capital=args.capital, protocol="continuous", weights=weights
+            )
+            cache[tilt] = result.net
+        sleeve = cache[tilt]
+        benchmark = etf_curve(etf_closes, sleeve.index, args.capital)
+        mixed = blend(benchmark, sleeve, alpha, args.capital)
+        metrics = compute_metrics(mixed)
+        active, te, ir = active_stats(mixed, benchmark)
+        index_curve = rde._curve_on(index_closes, mixed.index, args.capital)
+        sleeve_metrics = compute_metrics(sleeve)
+        sleeve_turnover = sleeve_metrics.turnover / max(sleeve_metrics.n_days / TRADING_DAYS, 1e-9)
         rows.append(
             {
+                "alpha": alpha,
                 "tilt": tilt,
                 "net": metrics.total_return,
-                "reference": float(reference.iloc[-1] / reference.iloc[0] - 1.0),
+                "etf": float(benchmark.iloc[-1] / benchmark.iloc[0] - 1.0),
                 "index": float(index_curve.iloc[-1] / index_curve.iloc[0] - 1.0),
                 "active": active,
                 "te": te,
                 "ir": ir,
-                "vs_index": vs_index,
                 "sharpe": metrics.sharpe,
                 "max_dd": metrics.max_drawdown,
-                "turnover": metrics.turnover / years,
+                "turnover": sleeve_turnover * alpha,
             }
         )
         print(
-            f"  tilt={tilt:<5g} net={metrics.total_return:+7.2%} ref={rows[-1]['reference']:+.2%} "
-            f"active={active:+7.2%} TE={te:6.2%} IR={ir:5.2f} "
-            f"turnover={metrics.turnover / years:5.0%}/yr"
+            f"  alpha={alpha:<4g} tilt={tilt:<4g} net={metrics.total_return:+7.2%} "
+            f"etf={rows[-1]['etf']:+.2%} active={active:+7.2%} TE={te:6.2%} IR={ir:5.2f}"
         )
 
-    reference_te = 0.0
-    reference_gap = 0.0
-    if reference_seen is not None:
-        index_on_ref = rde._curve_on(index_closes, reference_seen.index, args.capital)
-        _, reference_te, _ = active_stats(reference_seen, index_on_ref)
-        reference_gap = float(reference_seen.iloc[-1] / reference_seen.iloc[0] - 1.0) - float(
-            index_on_ref.iloc[-1] / index_on_ref.iloc[0] - 1.0
+    self_check = [row for row in rows if float(row["alpha"]) == 0.0]
+    check_note = (
+        "自检行缺失（未含 alpha=0）"
+        if not self_check
+        else (
+            "[自检通过] alpha=0 与 ETF 逐日一致"
+            if abs(float(self_check[0]["active"])) < 1e-9 and float(self_check[0]["te"]) < 1e-9
+            else f"[自检失败] alpha=0 仍有 {float(self_check[0]['active']):+.2%} 超额"
         )
+    )
 
     lines = [
-        "# 指数增强：在基准内偏离，量跟踪误差与信息比率",
+        "# 指数增强（核心 ETF + 倾斜子组合）",
         "",
         f"- 运行日期：{date.today().isoformat()}",
-        f"- 指数：{rde.BENCHMARK_INDEX}；池：{len(bars)} 只（按指数权重取前 {args.pool}）",
-        f"- 增强基准 = **池按指数权重持有**（可持有的那个组合）：它与指数的跟踪误差 "
-        f"{reference_te:.2%}、累计差 {reference_gap:+.2%}",
-        "- ⚠ 这个差值是「池代理误差」：只取前 N 大权重会让组合变成大市值集中下注，"
-        "不是指数。若该差值很大，下面的超额只能读成「相对这个池」，不能读成「相对沪深300」",
-        f"- 因子：{args.alpha}({args.lookback})；调仓：每 {args.test} 个交易日；资金：{args.capital:,.0f} 元",
+        f"- **基准 = {args.etf}（可交易、按 100 份/手，一手约 400 元，取整误差可忽略）**",
+        f"- 子组合池：{len(bars)} 只（{rde.BENCHMARK_INDEX} 前 {args.pool} 大权重，已剔除一手买不起的标的）",
+        "- 组合收益：`r = (1-alpha)·r_ETF + alpha·r_子组合(tilt)`",
+        f"- 因子：{args.alpha}({args.lookback})；调仓：每 {args.test} 个交易日；子组合资金：{args.capital:,.0f} 元",
         f"- 价格：{'自算前复权（不复权价 + 分红送转）' if not args.no_self_adjust else '供应商前复权'}",
+        f"- {check_note}",
         "",
-        "| tilt | 策略净 | 参考组合 | 指数 | 对参考超额 | 跟踪误差 | 信息比率 | 对指数超额 | Sharpe | 最大回撤 | 年化换手 |",
+        "| alpha | tilt | 组合净 | ETF | 沪深300 | 对 ETF 超额 | 跟踪误差 | 信息比率 | Sharpe | 最大回撤 | 换手(×alpha) |",
         "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for row in rows:
         lines.append(
-            f"| {row['tilt']:g} | {float(row['net']):+.2%} | {float(row['reference']):+.2%} "
-            f"| {float(row['index']):+.2%} | **{float(row['active']):+.2%}** "
-            f"| {float(row['te']):.2%} | {float(row['ir']):.2f} | {float(row['vs_index']):+.2%} "
-            f"| {float(row['sharpe']):.2f} | {float(row['max_dd']):.2%} | {float(row['turnover']):.0%} |"
+            f"| {row['alpha']:g} | {row['tilt']:g} | {float(row['net']):+.2%} | {float(row['etf']):+.2%} "
+            f"| {float(row['index']):+.2%} | **{float(row['active']):+.2%}** | {float(row['te']):.2%} "
+            f"| {float(row['ir']):.2f} | {float(row['sharpe']):.2f} | {float(row['max_dd']):.2%} "
+            f"| {float(row['turnover']):.0%} |"
         )
     lines += [
         "",
         "## 读法",
         "",
-        "- `tilt=0` 是自检行：策略净应与参考组合几乎相同（差异只剩整手取整、免交易带与成本）。"
-        "这一行明显偏离，说明口径有问题，不是好消息。",
-        "- 判据：**对参考组合的信息比率 > 0.5，且跟踪误差在预算内（≤5%）** 才算可用的指数增强；"
-        "超额为正但 IR 很低 = 承担了主动风险却没稳定换来收益。",
-        "- 局限：整段用一个权重快照（忽略指数调样）、池为前 N 大权重而非全部成分、只试了列出的 tilt，"
-        "且 tilt 与因子都是在同一窗口上挑的（见技术债 #20）。",
+        "- `alpha=0` 是**恒等式自检**：与 ETF 逐日相同才算记账正确。这一行不为 0，其它行都不必看。",
+        "- 判据：**对 ETF 的信息比率 > 0.5 且跟踪误差 ≤ 5%** 才算可用的指数增强；"
+        "超额为正但 IR 低 = 承担了主动风险没换来稳定收益。",
+        "- 局限：ETF 腿按曲线合成（未跑撮合，其交易成本 ~2bp 已在真实交易中体现，量级远小于子组合）；"
+        f"池只有前 {args.pool} 大权重；tilt 与 alpha 都在同一窗口上挑（技术债 #20）。",
         "",
     ]
     out = Path(args.report)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text("\n".join(lines), encoding="utf-8")
     print(f"wrote {out}")
+    print(check_note)
     return 0
 
 
