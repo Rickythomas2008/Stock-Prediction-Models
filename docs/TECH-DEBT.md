@@ -76,6 +76,7 @@
 | D11 | α 结论以**双源交叉验证**为准：low_vol > momentum > reversal 的排序在 akshare 与 baostock 上一致 | 单源排名可能是数据假象 | `docs/CONFIG-WALKFORWARD.md`（baostock）与 `-akshare.md` |
 | D12 | 复权口径改为**自算**：不复权价 + 分红送转表（akshare 明细 ÷10、baostock 已是每股） | 两家不复权逐日 20/20 一致，前复权却差到 0.5%；自算后与 baostock 一致到 **0.08%**，而 akshare 的 qfq 偏离自算值 1.9%~8.3% —— **akshare 的前复权是异常方** | `data/adjust.py`、`data/dividends.py`；`--self-adjust`（`index_enhance` 默认开） |
 | D13 | 指数增强 = **核心 ETF（510300）+ 倾斜子组合**，`r=(1-alpha)·r_ETF+alpha·r_子组合`；`alpha=0` 必须恒等于 ETF | 用指数或「池按权重」当基准时，`tilt=0` 复现不了自己的基准，比较被实现层噪声污染；ETF 可交易、整手 400 元、rounding 可忽略 | `tools/index_enhance.py`，报告 `docs/INDEX-ENHANCE.md` |
+| D14 | `xtquant` 只做**运行期探针**（`tools/xtquant_probe.py`，退出码 0/1/2），不进依赖、不进 allowlist、不写 `xttrader` | 它随 QMT 客户端分发、仅 Windows、许可证未核实；且本机现在为 `PRESENT-BUT-NO-CLIENT`（SDK 在系统 Python 用户目录，QMT 客户端未运行） | 探针即 R3 的红灯检查；QMT 极简版 + 模拟账号 + 券商书面确认三件齐了再谈适配器 |
 
 ### 指数增强结果（2026-11-05，ETF 基准，自检闭环）
 
